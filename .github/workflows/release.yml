@@ -1,0 +1,141 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  linux-musl:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - i686-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
+          - arm-unknown-linux-musleabi
+          - arm-unknown-linux-musleabihf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cross --locked
+      - run: cross build --release --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          set -e
+          mkdir -p dist
+          bin=target/${{ matrix.target }}/release/srun
+          ls -l "$bin"
+          tar -C "$(dirname "$bin")" -cJf dist/srun-${{ github.ref_name }}-${{ matrix.target }}.tar.xz srun
+          (cd dist && sha256sum *.tar.xz > srun-${{ github.ref_name }}-${{ matrix.target }}.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  mips-musl:
+    name: ${{ matrix.target }} (nightly, best effort)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 32-bit targets are soft-float o32 in rustc, matching the cross images.
+          - { target: mipsel-unknown-linux-musl, features: "+crt-static" }
+          - { target: mips-unknown-linux-musl, features: "+crt-static" }
+          # 64-bit rustc targets are hard-float but the cross images ship a
+          # soft-float musl; +soft-float aligns them (unstable, nightly only).
+          - { target: mips64el-unknown-linux-muslabi64, features: "+crt-static,+soft-float" }
+          - { target: mips64-unknown-linux-muslabi64, features: "+crt-static,+soft-float" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - run: cargo install cross --locked
+      # Tier 3: no rust-std, no self-contained crt/libunwind. Cross.toml
+      # pre-build aliases libgcc_eh as libunwind inside the image.
+      - run: cross +nightly build --release --target ${{ matrix.target }} -Z build-std=std,panic_abort
+        env:
+          RUSTFLAGS: -C target-feature=${{ matrix.features }} -C link-self-contained=no
+      - name: Package
+        run: |
+          set -e
+          mkdir -p dist
+          bin=target/${{ matrix.target }}/release/srun
+          ls -l "$bin"
+          tar -C "$(dirname "$bin")" -cJf dist/srun-${{ github.ref_name }}-${{ matrix.target }}.tar.xz srun
+          (cd dist && sha256sum *.tar.xz > srun-${{ github.ref_name }}-${{ matrix.target }}.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  native:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-latest, target: i686-pc-windows-msvc }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          set -e
+          mkdir -p dist
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            bin=target/${{ matrix.target }}/release/srun.exe
+            ls -l "$bin"
+            (cd "$(dirname "$bin")" && 7z a "$GITHUB_WORKSPACE/dist/srun-${{ github.ref_name }}-${{ matrix.target }}.zip" srun.exe >/dev/null)
+            (cd dist && sha256sum *.zip > srun-${{ github.ref_name }}-${{ matrix.target }}.sha256)
+          else
+            bin=target/${{ matrix.target }}/release/srun
+            ls -l "$bin"
+            tar -C "$(dirname "$bin")" -cJf dist/srun-${{ github.ref_name }}-${{ matrix.target }}.tar.xz srun
+            (cd dist && shasum -a 256 *.tar.xz > srun-${{ github.ref_name }}-${{ matrix.target }}.sha256)
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    # mips-musl is continue-on-error, so a failed MIPS build still lets
+    # publish run; whatever MIPS artifacts succeeded are included.
+    needs: [linux-musl, mips-musl, native]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          prerelease: ${{ contains(github.ref_name, '-') }}

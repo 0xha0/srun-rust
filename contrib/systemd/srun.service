@@ -1,0 +1,21 @@
+# systemd unit for srun. Install:
+#   install -m 755 srun /usr/local/bin/srun
+#   mkdir -p /etc/srun && srun -c /etc/srun/config.json user add NAME
+#   cp srun.service /etc/systemd/system/ && systemctl enable --now srun
+# Logs: journalctl -u srun -f
+
+[Unit]
+Description=srun campus network keep-alive
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/srun -c /etc/srun/config.json daemon
+Restart=always
+RestartSec=10
+# Uncomment to drop the session on stop:
+# ExecStopPost=/usr/local/bin/srun -c /etc/srun/config.json logout
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+/target*
+/ref
+/build/release
+*.log
+/build/asus
+.DS_Store

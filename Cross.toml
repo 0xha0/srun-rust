@@ -1,0 +1,25 @@
+# Tier 3 MIPS musl targets: rustc ships no self-contained crt/libunwind, so
+# link with the image's own crt objects and alias libgcc_eh as libunwind.
+# Build with:
+#   RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=no" \
+#   cross +nightly build --release --target <mips target> -Z build-std=std,panic_abort
+
+[target.mipsel-unknown-linux-musl]
+pre-build = [
+    "d=$(dirname $(mipsel-linux-muslsf-gcc -print-file-name=crt1.o)); ln -sf $(mipsel-linux-muslsf-gcc -print-file-name=libgcc_eh.a) $d/libunwind.a",
+]
+
+[target.mips-unknown-linux-musl]
+pre-build = [
+    "d=$(dirname $(mips-linux-muslsf-gcc -print-file-name=crt1.o)); ln -sf $(mips-linux-muslsf-gcc -print-file-name=libgcc_eh.a) $d/libunwind.a",
+]
+
+[target.mips64el-unknown-linux-muslabi64]
+pre-build = [
+    "d=$(dirname $(mips64el-linux-muslsf-gcc -print-file-name=crt1.o)); ln -sf $(mips64el-linux-muslsf-gcc -print-file-name=libgcc_eh.a) $d/libunwind.a",
+]
+
+[target.mips64-unknown-linux-muslabi64]
+pre-build = [
+    "d=$(dirname $(mips64-linux-muslsf-gcc -print-file-name=crt1.o)); ln -sf $(mips64-linux-muslsf-gcc -print-file-name=libgcc_eh.a) $d/libunwind.a",
+]
