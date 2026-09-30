@@ -131,7 +131,7 @@ forks; let the init system keep it alive. Templates in `contrib/`:
 | platform | file |
 |---|---|
 | OpenWrt (procd) | `contrib/openwrt/srun.init` |
-| Asuswrt-Merlin (jffs scripts + cru watchdog) | `contrib/asuswrt-merlin/srun.sh` |
+| Asuswrt-Merlin (jffs hooks, wan-event restart, cru watchdog) | `contrib/asuswrt-merlin/srun.sh` |
 | systemd | `contrib/systemd/srun.service` |
 | macOS launchd | `contrib/launchd/com.srun.daemon.plist` |
 | Windows Task Scheduler | `contrib/windows/register-task.ps1` |
