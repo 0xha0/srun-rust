@@ -22,5 +22,6 @@ else
     pkg="$name.tar.xz"
 fi
 (cd "$out" && sha "$pkg" > "$name.sha256")
-size=$(stat -f %z "$(basename "$bin")" 2>/dev/null || stat -c %s "$(basename "$bin")")
+# wc -c is the only size query that behaves the same on macOS, GNU and git-bash.
+size=$(wc -c < "$(basename "$bin")" | tr -d ' ')
 printf '%-40s %8d bytes\n' "$target" "$size" | tee -a "$out/SIZES.txt"
