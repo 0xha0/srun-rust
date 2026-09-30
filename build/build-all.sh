@@ -30,13 +30,16 @@ pack() { "$ROOT/build/pack.sh" "$1" "$2" "$OUT" "$VERSION"; }
 
 # Each cross image gets its own target dir: host-side build scripts compiled
 # in one image (newer glibc) do not run in another (older glibc).
-# build_cross TARGET [RUSTFLAGS] [TOOLCHAIN-ARGS...]
+# build_cross TARGET [RUSTFLAGS] [TOOLCHAIN] [EXTRA CARGO ARGS...]
+# The toolchain (+nightly) must precede `build` and -Z flags must follow it,
+# or cross cannot find the subcommand and silently runs the host cargo.
 build_cross() {
-    local t=$1 flags=${2:-}
-    shift; shift || true
+    local t=$1 flags=${2:-} toolchain=${3:-}
+    shift; shift || true; shift || true
     want "$t" || return 0
     echo "### $t"
-    CARGO_TARGET_DIR="target/cross-$t" RUSTFLAGS="$flags" cross "$@" build --release --target "$t"
+    CARGO_TARGET_DIR="target/cross-$t" RUSTFLAGS="$flags" \
+        cross ${toolchain:+"$toolchain"} build "$@" --release --target "$t"
     local bin="target/cross-$t/$t/release/srun"
     [[ "$t" == *windows* ]] && bin="$bin.exe"
     pack "$t" "$bin"
