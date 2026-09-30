@@ -30,6 +30,10 @@ pub struct State {
     pub online_user: String,
     /// Reject the next login with this ecode, once.
     pub reject_once: Option<String>,
+    /// Make ac_id detection fail (`/` answers 500).
+    pub acid_fail: bool,
+    /// Close the connection of the next login request without answering.
+    pub drop_next_login: bool,
 }
 
 pub struct MockServer {
@@ -133,6 +137,7 @@ fn handle(mut conn: TcpStream, st: Arc<Mutex<State>>, port: u16) {
     let (path, q) = parse_query(&target);
     let mut s = st.lock().unwrap();
     match path.as_str() {
+        "/" if s.acid_fail => respond(&mut conn, "500 Internal Server Error", &[], b"", false),
         "/" => respond(
             &mut conn,
             "302 Found",
@@ -165,6 +170,12 @@ fn handle(mut conn: TcpStream, st: Arc<Mutex<State>>, port: u16) {
             }
         }
         "/cgi-bin/srun_portal" => match q.get("action").map(|s| s.as_str()) {
+            Some("login") if s.drop_next_login => {
+                s.drop_next_login = false;
+                s.logins += 1;
+                s.last_login = Some(q.clone());
+                return; // connection closes without a response
+            }
             Some("login") => {
                 s.logins += 1;
                 s.last_login = Some(q.clone());

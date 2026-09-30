@@ -118,8 +118,10 @@ fn cached_acid(s: &Session, client: &Client, cache: &mut Option<i64>) -> i64 {
     match cache {
         Some(a) => *a,
         None => {
-            let a = s.resolve_acid(client);
-            *cache = Some(a);
+            let (a, reliable) = s.resolve_acid(client);
+            if reliable {
+                *cache = Some(a);
+            }
             a
         }
     }
@@ -204,7 +206,7 @@ pub fn logout(s: &Session) -> Result<()> {
         crate::log_warn!("not online, nothing to do");
         return Ok(());
     };
-    let acid = s.resolve_acid(&client);
+    let (acid, _) = s.resolve_acid(&client);
     let ip = if ip.is_empty() {
         st.online_ip.clone()
     } else {
@@ -242,7 +244,7 @@ pub fn switch(s: &Session) -> Result<()> {
     })?;
     let ip = s.resolve_ip(&user)?;
     let client = s.client_for(&ip)?;
-    let acid = s.resolve_acid(&client);
+    let (acid, _) = s.resolve_acid(&client);
     if let Some(st) = online_user(&client)? {
         if st.user_name == user.username {
             crate::log_info!("already online as {}", user.username);

@@ -118,7 +118,11 @@ srun daemon [--interval 60] [--probe server|none|HOST:PORT] [--logout-on-exit]
 ```
 
 Runs in the foreground and logs to stderr: every interval it asks the portal
-whether this host is online and logs in again if not. Under procd or systemd
+whether this host is online and logs in again if not. Network errors only
+back off; the daemon never switches to a fallback account over them, only
+when the portal explicitly rejects the current one. A failed `ac_id`
+detection (WAN still down) affects that attempt only and is retried next
+round. Under procd or systemd
 stderr lands in the system log; on firmware without a supervisor pipe it
 through `logger` (`srun daemon 2>&1 | logger -t srun`). Failed attempts back off exponentially
 (up to 10 minutes). SIGTERM / Ctrl-C stops it with exit code 0. It never

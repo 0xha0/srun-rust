@@ -106,8 +106,12 @@ pub fn run(s: &Session) -> Result<()> {
             let acid = match acid_cache {
                 Some(a) => a,
                 None => {
-                    let a = s.resolve_acid(&client);
-                    acid_cache = Some(a);
+                    // Only a detected/fixed value is kept; a failed detection
+                    // (WAN still down) is retried next round.
+                    let (a, reliable) = s.resolve_acid(&client);
+                    if reliable {
+                        acid_cache = Some(a);
+                    }
                     a
                 }
             };
@@ -140,8 +144,16 @@ pub fn run(s: &Session) -> Result<()> {
                     crate::log_warn!("login rejected user={}: {e}, trying next", user.username);
                 }
                 Err(e) => {
-                    crate::log_warn!("login failed user={}: {e}", user.username);
+                    // Network trouble: never switch accounts over it. End
+                    // the round and let the backoff retry the same user.
+                    crate::log_warn!(
+                        "login failed user={}: {e}; ending this round",
+                        user.username
+                    );
                     all_ok = false;
+                    if one_at_a_time {
+                        break;
+                    }
                 }
             }
         }

@@ -217,21 +217,24 @@ impl Session {
         Ok(c)
     }
 
-    pub fn resolve_acid(&self, client: &Client) -> i64 {
+    /// The ac_id to use and whether it is reliable (fixed in config or just
+    /// detected). Callers must not cache an unreliable value: detection fails
+    /// while the WAN is down and must be retried on the next attempt.
+    pub fn resolve_acid(&self, client: &Client) -> (i64, bool) {
         if let Some(n) = self.acid.fixed() {
-            return n;
+            return (n, true);
         }
         match client.detect_acid() {
             Ok(n) => {
                 crate::log_info!("acid detected: {n}");
-                n
+                (n, true)
             }
             Err(e) => {
                 crate::log_warn!(
-                    "acid detection failed ({e}), using {}",
+                    "acid detection failed ({e}), using {} for this attempt",
                     crate::protocol::client::DEFAULT_ACID
                 );
-                crate::protocol::client::DEFAULT_ACID
+                (crate::protocol::client::DEFAULT_ACID, false)
             }
         }
     }

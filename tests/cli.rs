@@ -648,3 +648,135 @@ fn status_ip_binds_locally() {
     let (code, _, e) = run(&["-s", &url, "status", "-i", "203.0.113.9"]);
     assert_eq!(code, 4, "{e}");
 }
+
+#[cfg(unix)]
+fn spawn_daemon(
+    cfg: &std::path::Path,
+    extra: &[&str],
+) -> (std::process::Child, std::sync::mpsc::Receiver<String>) {
+    use std::io::{BufRead, BufReader};
+    let mut args = vec![
+        "-c",
+        cfg.to_str().unwrap(),
+        "daemon",
+        "--interval",
+        "5",
+        "-v",
+    ];
+    args.extend_from_slice(extra);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_srun"))
+        .args(&args)
+        .env("HOME", std::env::temp_dir())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+            let _ = tx.send(line);
+        }
+    });
+    (child, rx)
+}
+
+#[cfg(unix)]
+fn wait_for_line(rx: &std::sync::mpsc::Receiver<String>, needle: &str) -> Vec<String> {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        if let Ok(l) = rx.recv_timeout(Duration::from_millis(200)) {
+            seen.push(l.clone());
+            if l.contains(needle) {
+                return seen;
+            }
+        }
+    }
+    panic!("timeout waiting for {needle:?}, saw {seen:?}");
+}
+
+#[cfg(unix)]
+fn stop_daemon(mut child: std::process::Child) {
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+}
+
+#[cfg(unix)]
+fn two_user_config(m: &MockServer, tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("srun-{tag}-{}-{}", std::process::id(), m.port));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            r#"{{"server":"{}","acid":"auto","retry_delay_ms":50,"default_user":"a","users":[{{"name":"a","username":"1120240001","password":"{}"}},{{"name":"b","username":"other","password":"{}"}}]}}"#,
+            m.url(),
+            PASSWORD,
+            PASSWORD
+        ),
+    )
+    .unwrap();
+    cfg
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_redetects_acid_after_failure() {
+    let m = MockServer::start();
+    m.state.lock().unwrap().acid_fail = true;
+    let cfg = two_user_config(&m, "acid");
+    let (child, rx) = spawn_daemon(&cfg, &[]);
+    let seen = wait_for_line(&rx, "login ok user=1120240001");
+    assert!(
+        seen.iter().any(|l| l.contains("acid detection failed")),
+        "{seen:?}"
+    );
+    assert_eq!(
+        m.state.lock().unwrap().last_login.as_ref().unwrap()["ac_id"],
+        "12"
+    );
+    // WAN "comes up": detection works again and must be used, not a cached 12
+    {
+        let mut st = m.state.lock().unwrap();
+        st.acid_fail = false;
+        st.online = false;
+    }
+    let seen = wait_for_line(&rx, "acid detected: 8");
+    assert!(!seen.iter().any(|l| l.contains("user=other")), "{seen:?}");
+    wait_for_line(&rx, "login ok user=1120240001");
+    assert_eq!(
+        m.state.lock().unwrap().last_login.as_ref().unwrap()["ac_id"],
+        "8"
+    );
+    stop_daemon(child);
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_does_not_switch_account_on_network_error() {
+    let m = MockServer::start();
+    m.state.lock().unwrap().drop_next_login = true;
+    let cfg = two_user_config(&m, "neterr");
+    let (child, rx) = spawn_daemon(&cfg, &[]);
+    let seen = wait_for_line(&rx, "ending this round");
+    assert!(
+        seen.iter()
+            .any(|l| l.contains("login failed user=1120240001")),
+        "{seen:?}"
+    );
+    assert!(!seen.iter().any(|l| l.contains("user=other")), "{seen:?}");
+    {
+        let st = m.state.lock().unwrap();
+        assert_eq!(st.logins, 1);
+        assert_eq!(st.last_login.as_ref().unwrap()["username"], "1120240001");
+        assert!(!st.online);
+    }
+    // next round (after backoff): the same default user logs in
+    let seen = wait_for_line(&rx, "login ok user=1120240001");
+    assert!(!seen.iter().any(|l| l.contains("user=other")), "{seen:?}");
+    assert_eq!(m.state.lock().unwrap().online_user, "1120240001");
+    stop_daemon(child);
+}
