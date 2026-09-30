@@ -3,9 +3,10 @@
 pub mod paths;
 
 use crate::error::{Error, Result};
-use crate::protocol::PasswordMode;
+use crate::protocol::client::{DEFAULT_N, DEFAULT_NAME, DEFAULT_OS, DEFAULT_TYPE};
+use crate::protocol::{Client, PasswordMode};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub const DEFAULT_SERVER: &str = "http://10.0.0.55";
 
@@ -102,10 +103,10 @@ impl Default for Config {
             retry_delay_ms: 1000,
             strict_bind: false,
             double_stack: false,
-            os: "Windows 10".to_string(),
-            name: "Windows".to_string(),
-            n: 200,
-            utype: 1,
+            os: DEFAULT_OS.to_string(),
+            name: DEFAULT_NAME.to_string(),
+            n: DEFAULT_N,
+            utype: DEFAULT_TYPE,
             default_user: None,
             daemon: DaemonConfig::default(),
             users: Vec::new(),
@@ -132,10 +133,8 @@ impl Config {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
-            if !dir.as_os_str().is_empty() && !dir.exists() {
-                std::fs::create_dir_all(dir)
-                    .map_err(|e| Error::config(format!("create {}: {e}", dir.display())))?;
-            }
+            std::fs::create_dir_all(dir)
+                .map_err(|e| Error::config(format!("create {}: {e}", dir.display())))?;
         }
         let mut text = serde_json::to_string_pretty(self)
             .map_err(|e| Error::internal(format!("serialize config: {e}")))?;
@@ -160,15 +159,6 @@ impl Config {
             .or_else(|| self.users.iter().find(|u| u.username == name))
     }
 
-    pub fn find_user_mut(&mut self, name: &str) -> Option<&mut User> {
-        let idx = self
-            .users
-            .iter()
-            .position(|u| u.name == name)
-            .or_else(|| self.users.iter().position(|u| u.username == name))?;
-        self.users.get_mut(idx)
-    }
-
     /// Default user first, then the others in file order.
     pub fn users_default_first(&self) -> Vec<User> {
         let mut v = Vec::with_capacity(self.users.len());
@@ -181,6 +171,33 @@ impl Config {
             }
         }
         v
+    }
+
+    /// A portal client for this config's server and parameters.
+    pub fn client(&self, server: &str) -> Result<Client> {
+        let mut c = Client::new(crate::http::Url::parse(server)?);
+        c.n = self.n;
+        c.utype = self.utype;
+        c.os = self.os.clone();
+        c.name = self.name.clone();
+        c.double_stack = self.double_stack;
+        Ok(c)
+    }
+
+    /// Turn `obf1:` passwords into plaintext for this process. A broken entry
+    /// is treated as "no stored password" rather than failing every command.
+    pub fn decode_passwords(&mut self) {
+        for u in self.users.iter_mut() {
+            if crate::obf::is_obfuscated(&u.password) {
+                match crate::obf::decode(&u.username, &u.password) {
+                    Ok(pw) => u.password = pw,
+                    Err(e) => {
+                        crate::log_warn!("{e}; treating the password as unset");
+                        u.password.clear();
+                    }
+                }
+            }
+        }
     }
 
     /// The user chosen by `default_user`, else the only user, else none.
@@ -218,12 +235,11 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, data)
 }
 
-pub fn path_for_read(explicit: Option<&str>) -> PathBuf {
-    paths::resolve(explicit)
-}
-
-pub fn path_for_write(explicit: Option<&str>) -> PathBuf {
-    paths::resolve_for_write(explicit)
+/// `SRUN_PASSWORD`, when set and non-empty.
+pub fn env_password() -> Option<String> {
+    std::env::var("SRUN_PASSWORD")
+        .ok()
+        .filter(|p| !p.is_empty())
 }
 
 #[cfg(test)]

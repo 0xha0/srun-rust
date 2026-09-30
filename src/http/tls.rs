@@ -7,7 +7,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, StreamOwned};
 use std::net::TcpStream;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 impl Stream for StreamOwned<ClientConnection, TcpStream> {}
 
@@ -59,7 +59,15 @@ impl ServerCertVerifier for NoVerify {
     }
 }
 
+/// Built once per process: the root store alone is ~150 certificates.
 fn config(insecure: bool) -> Arc<ClientConfig> {
+    static SECURE: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    static INSECURE: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    let cell = if insecure { &INSECURE } else { &SECURE };
+    cell.get_or_init(|| build_config(insecure)).clone()
+}
+
+fn build_config(insecure: bool) -> Arc<ClientConfig> {
     let provider = rustls::crypto::ring::default_provider();
     let builder = ClientConfig::builder_with_provider(Arc::new(provider.clone()))
         .with_safe_default_protocol_versions()

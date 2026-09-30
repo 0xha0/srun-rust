@@ -1,7 +1,7 @@
 mod common;
 
 use common::{MockServer, CLIENT_IP, PASSWORD};
-use srun::protocol::{LoginRequest, PasswordMode};
+use srun::protocol::{LoginOutcome, LoginRequest, PasswordMode};
 use srun::Error;
 
 fn req(ip: &str, mode: PasswordMode) -> LoginRequest {
@@ -25,9 +25,13 @@ fn detects_acid_through_redirect_chain() {
 #[test]
 fn login_with_detected_ip_and_official_params() {
     let m = MockServer::start();
-    let out = m.client().login(&req("", PasswordMode::Real)).unwrap();
-    assert_eq!(out.ip, CLIENT_IP);
-    assert_eq!(out.resp.suc_msg, "login_ok");
+    let LoginOutcome::LoggedIn { ip, resp } =
+        m.client().login(&req("", PasswordMode::Real)).unwrap()
+    else {
+        panic!("expected a fresh login")
+    };
+    assert_eq!(ip, CLIENT_IP);
+    assert_eq!(resp.suc_msg, "login_ok");
     let st = m.state.lock().unwrap();
     let p = st.last_login.as_ref().unwrap();
     assert_eq!(p["n"], "200");
@@ -45,8 +49,11 @@ fn login_with_explicit_ip_and_double_stack() {
     let m = MockServer::start();
     let mut c = m.client();
     c.double_stack = true;
-    let out = c.login(&req("10.1.2.3", PasswordMode::Real)).unwrap();
-    assert_eq!(out.ip, "10.1.2.3");
+    let LoginOutcome::LoggedIn { ip, .. } = c.login(&req("10.1.2.3", PasswordMode::Real)).unwrap()
+    else {
+        panic!("expected a fresh login")
+    };
+    assert_eq!(ip, "10.1.2.3");
     let st = m.state.lock().unwrap();
     let p = st.last_login.as_ref().unwrap();
     assert_eq!(p["ip"], "10.1.2.3");
@@ -81,15 +88,10 @@ fn empty_password_mode_only_works_when_server_allows() {
 fn second_login_reports_already_online() {
     let m = MockServer::start();
     m.client().login(&req("", PasswordMode::Real)).unwrap();
-    let err = m.client().login(&req("", PasswordMode::Real)).unwrap_err();
-    match &err {
-        Error::Rejected { code, .. } => assert_eq!(code, "ip_already_online_error"),
+    match m.client().login(&req("", PasswordMode::Real)).unwrap() {
+        LoginOutcome::AlreadyOnline { online_as } => assert_eq!(online_as, "1120240001"),
         other => panic!("unexpected {other:?}"),
     }
-    assert_eq!(
-        err.to_string(),
-        "rejected: already online (ip_already_online_error)"
-    );
 }
 
 #[test]

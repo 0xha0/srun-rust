@@ -118,23 +118,73 @@ pub const DAEMON_OPTS: &[OptSpec] = &[
 pub const MANAGE_CONFIG_OPTS: &[OptSpec] =
     &[OptSpec::flag(None, "force", "overwrite an existing file")];
 
-const COMMANDS: &[(&str, &str)] = &[
-    ("login", "authenticate (default when no command given)"),
-    ("logout", "de-authenticate"),
-    ("status", "show online info (alias: info)"),
-    ("switch", "log out whoever is online and log in as NAME"),
-    ("daemon", "stay online: check and re-login in a loop"),
-    (
-        "user",
-        "manage users in config: add | remove | list | default",
-    ),
-    ("config", "show | path | init | obfuscate"),
-    ("version", "print version and target"),
+struct Cmd {
+    name: &'static str,
+    help: &'static str,
+    usage: &'static str,
+    opts: &'static [&'static [OptSpec]],
+}
+
+const COMMANDS: &[Cmd] = &[
+    Cmd {
+        name: "login",
+        help: "authenticate (default when no command given)",
+        usage: "srun login [OPTIONS]",
+        opts: &[GLOBAL_OPTS, USER_OPTS, IP_OPTS, LOGIN_OPTS],
+    },
+    Cmd {
+        name: "logout",
+        help: "de-authenticate",
+        usage: "srun logout [OPTIONS]",
+        opts: &[GLOBAL_OPTS, USER_OPTS, IP_OPTS],
+    },
+    Cmd {
+        name: "status",
+        help: "show online info (alias: info)",
+        usage: "srun status [OPTIONS]",
+        opts: &[GLOBAL_OPTS, USER_OPTS, IP_OPTS],
+    },
+    Cmd {
+        name: "switch",
+        help: "log out whoever is online and log in as NAME",
+        usage: "srun switch NAME [OPTIONS]",
+        opts: &[GLOBAL_OPTS, IP_OPTS, LOGIN_OPTS],
+    },
+    Cmd {
+        name: "daemon",
+        help: "stay online: check and re-login in a loop",
+        usage: "srun daemon [OPTIONS]",
+        opts: &[GLOBAL_OPTS, USER_OPTS, IP_OPTS, LOGIN_OPTS, DAEMON_OPTS],
+    },
+    Cmd {
+        name: "user",
+        help: "manage users in config: add | remove | list | default",
+        usage: "srun user add USERNAME [--name ALIAS] [-p PASSWORD] [--ip IP | --ifname NAME] [--default] [--force]\n       srun user remove NAME [--force] | srun user list | srun user default NAME",
+        opts: &[GLOBAL_OPTS, MANAGE_USER_OPTS],
+    },
+    Cmd {
+        name: "config",
+        help: "show | path | init | obfuscate",
+        usage: "srun config show | path | init [--force] | obfuscate",
+        opts: &[GLOBAL_OPTS, MANAGE_CONFIG_OPTS],
+    },
+    Cmd {
+        name: "version",
+        help: "print version and target",
+        usage: "srun version",
+        opts: &[GLOBAL_OPTS],
+    },
 ];
 
 /// Index of the command token: the first token that is neither an option
-/// nor the value of a value-taking global option.
+/// nor the value of a value-taking global option. Only global options may
+/// precede the command.
 fn find_command_index(args: &[String]) -> Option<usize> {
+    let takes_value = |long: &str, short: Option<char>| {
+        GLOBAL_OPTS
+            .iter()
+            .any(|o| o.takes_value && (o.long == long || (short.is_some() && o.short == short)))
+    };
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -143,16 +193,11 @@ fn find_command_index(args: &[String]) -> Option<usize> {
         }
         if let Some(long) = a.strip_prefix("--") {
             let name = long.split('=').next().unwrap_or("");
-            let takes = GLOBAL_OPTS.iter().any(|o| o.long == name && o.takes_value);
-            if takes && !long.contains('=') {
+            if takes_value(name, None) && !long.contains('=') {
                 i += 1;
             }
         } else if a.starts_with('-') && a.len() > 1 {
-            let last = a.chars().last().unwrap_or(' ');
-            let takes = GLOBAL_OPTS
-                .iter()
-                .any(|o| o.short == Some(last) && o.takes_value);
-            if takes {
+            if takes_value("", a.chars().last()) {
                 i += 1;
             }
         } else {
@@ -161,14 +206,6 @@ fn find_command_index(args: &[String]) -> Option<usize> {
         i += 1;
     }
     None
-}
-
-fn find_command(args: &[String]) -> Option<&str> {
-    find_command_index(args).map(|i| args[i].as_str())
-}
-
-fn specs(parts: &[&[OptSpec]]) -> Vec<OptSpec> {
-    parts.iter().flat_map(|p| p.iter().copied()).collect()
 }
 
 pub fn run(args: Vec<String>) -> i32 {
@@ -182,54 +219,34 @@ pub fn run(args: Vec<String>) -> i32 {
 }
 
 fn run_inner(args: &[String]) -> Result<()> {
-    let explicit = find_command(args);
-    if explicit.is_none() && args.iter().any(|a| a == "-h" || a == "--help") {
+    let idx = find_command_index(args);
+    if idx.is_none() && args.iter().any(|a| a == "-h" || a == "--help") {
         print_root_help();
         return Ok(());
     }
-    let cmd = explicit.unwrap_or("login");
-    let cmd = match cmd {
+    let name = match idx.map(|i| args[i].as_str()).unwrap_or("login") {
         "info" => "status",
         other => other,
     };
-    if !COMMANDS.iter().any(|(c, _)| *c == cmd) {
-        return Err(Error::usage(format!(
-            "unknown command '{cmd}' (try: srun --help)"
-        )));
-    }
+    let cmd = COMMANDS
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| Error::usage(format!("unknown command '{name}' (try: srun --help)")))?;
     let mut rest: Vec<String> = args.to_vec();
-    if let Some(pos) = find_command_index(args) {
+    if let Some(pos) = idx {
         rest.remove(pos);
     }
-    let (usage, opts): (&str, Vec<OptSpec>) = match cmd {
-        "login" => (
-            "srun login [OPTIONS]",
-            specs(&[GLOBAL_OPTS, USER_OPTS, IP_OPTS, LOGIN_OPTS]),
-        ),
-        "logout" => ("srun logout [OPTIONS]", specs(&[GLOBAL_OPTS, USER_OPTS, IP_OPTS])),
-        "daemon" => (
-            "srun daemon [OPTIONS]",
-            specs(&[GLOBAL_OPTS, USER_OPTS, IP_OPTS, LOGIN_OPTS, DAEMON_OPTS]),
-        ),
-        "status" => ("srun status [OPTIONS]", specs(&[GLOBAL_OPTS, USER_OPTS, IP_OPTS])),
-        "switch" => ("srun switch NAME [OPTIONS]", specs(&[GLOBAL_OPTS, IP_OPTS, LOGIN_OPTS])),
-        "user" => (
-            "srun user add USERNAME [--name ALIAS] [-p PASSWORD] [--ip IP | --ifname NAME] [--default] [--force]\n       srun user remove NAME [--force] | srun user list | srun user default NAME",
-            specs(&[GLOBAL_OPTS, MANAGE_USER_OPTS]),
-        ),
-        "config" => ("srun config show | path | init [--force] | obfuscate", specs(&[GLOBAL_OPTS, MANAGE_CONFIG_OPTS])),
-        _ => (cmd, specs(&[GLOBAL_OPTS])),
-    };
+    let opts: Vec<OptSpec> = cmd.opts.iter().flat_map(|p| p.iter().copied()).collect();
     let p = args::parse(&rest, &opts)?;
     apply_global(&p);
     if p.flag("help") {
-        out(&format!("Usage: {usage}"));
+        out(&format!("Usage: {}", cmd.usage));
         out("");
         out("Options:");
         out(&args::usage_block(&opts));
         return Ok(());
     }
-    match cmd {
+    match cmd.name {
         "version" => {
             out(&format!("srun {} ({})", crate::VERSION, crate::TARGET));
             Ok(())
@@ -241,9 +258,7 @@ fn run_inner(args: &[String]) -> Result<()> {
         "daemon" => crate::daemon::run(&Session::build(p)?),
         "user" => manage::user(&p),
         "config" => manage::config_cmd(&p),
-        _ => Err(Error::internal(format!(
-            "command '{cmd}' not implemented yet"
-        ))),
+        other => unreachable!("command table lists {other}"),
     }
 }
 
@@ -252,24 +267,25 @@ pub fn apply_global(p: &Parsed) {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     crate::text::set_utf8(!(p.flag("ascii") || env_ascii));
-    if p.flag("quiet") {
-        crate::log::set_level(Level::Error);
+    let level = if p.flag("quiet") {
+        Level::Error
     } else {
         match p.count("verbose") {
-            0 => crate::log::set_level(Level::Info),
-            1 => crate::log::set_level(Level::Debug),
-            _ => crate::log::set_level(Level::Trace),
+            0 => Level::Info,
+            1 => Level::Debug,
+            _ => Level::Trace,
         }
-    }
+    };
+    crate::log::set_level(level);
 }
 
 pub fn print_root_help() {
     out("Usage: srun [OPTIONS] [COMMAND] [COMMAND OPTIONS]");
     out("");
     out("Commands:");
-    let width = COMMANDS.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
-    for (c, h) in COMMANDS {
-        out(&format!("  {c:<width$}  {h}"));
+    let width = COMMANDS.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    for c in COMMANDS {
+        out(&format!("  {:<width$}  {}", c.name, c.help));
     }
     out("");
     out("Global options:");

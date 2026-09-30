@@ -59,14 +59,10 @@ mod tests {
         serde_json::from_str(raw).unwrap()
     }
 
-    fn hex(b: &[u8]) -> String {
-        b.iter().map(|x| format!("{x:02x}")).collect()
-    }
-
     #[test]
     fn xencode_matches_go_oracle() {
         for v in vectors() {
-            let got = hex(&xencode::xencode(v.msg.as_bytes(), v.token.as_bytes()));
+            let got = hash::hex(&xencode::xencode(v.msg.as_bytes(), v.token.as_bytes()));
             assert_eq!(got, v.xencode_hex, "msg={:?}", v.msg);
         }
     }

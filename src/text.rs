@@ -47,23 +47,28 @@ pub fn ascii(s: &str) -> String {
     out
 }
 
+fn line(w: &mut dyn Write, s: &str) {
+    let _ = w.write_all(ascii(s).as_bytes());
+    let _ = w.write_all(b"\n");
+    let _ = w.flush();
+}
+
 /// Print one sanitized line to stdout. Broken pipes are ignored so that
 /// `srun status | head -1` does not turn into an error.
 pub fn out(s: &str) {
-    let stdout = std::io::stdout();
-    let mut lock = stdout.lock();
-    let _ = lock.write_all(ascii(s).as_bytes());
-    let _ = lock.write_all(b"\n");
-    let _ = lock.flush();
+    line(&mut std::io::stdout().lock(), s);
 }
 
 /// Print one sanitized line to stderr.
 pub fn err(s: &str) {
-    let stderr = std::io::stderr();
-    let mut lock = stderr.lock();
-    let _ = lock.write_all(ascii(s).as_bytes());
-    let _ = lock.write_all(b"\n");
-    let _ = lock.flush();
+    line(&mut std::io::stderr().lock(), s);
+}
+
+/// Strip trailing `\r` / `\n`.
+pub fn chomp(line: &mut String) {
+    while line.ends_with('\n') || line.ends_with('\r') {
+        line.pop();
+    }
 }
 
 /// Human readable byte count, e.g. `1.23 GB`.

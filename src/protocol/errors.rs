@@ -54,6 +54,12 @@ pub fn describe(code: &str) -> Option<&'static str> {
     })
 }
 
+/// Rejections the portal lifts by itself after a while: E2532 (two
+/// authentications too close together) and E2533 (too many attempts).
+pub fn is_transient(code: &str) -> bool {
+    matches!(code, "E2532" | "E2533")
+}
+
 /// Human readable text for a portal reply: `wrong password (E2553)`,
 /// `already online (ip_already_online_error)`, or the raw server strings
 /// when the code is unknown: `login_error (E9999): server message`.

@@ -70,10 +70,12 @@ fn resolve(url: &Url) -> Result<Vec<SocketAddr>> {
     if let Ok(ip) = url.host.parse::<IpAddr>() {
         return Ok(vec![SocketAddr::new(ip, url.port)]);
     }
-    let addrs: Vec<SocketAddr> = (url.host.as_str(), url.port)
+    let mut addrs: Vec<SocketAddr> = (url.host.as_str(), url.port)
         .to_socket_addrs()
         .map_err(|e| Error::network(format!("resolve {}: {e}", url.host)))?
         .collect();
+    // Campus portals are v4; a dead v6 path would cost a full connect timeout.
+    addrs.sort_by_key(|a| !a.is_ipv4());
     if addrs.is_empty() {
         return Err(Error::network(format!("resolve {}: no address", url.host)));
     }
@@ -151,9 +153,7 @@ fn read_line(r: &mut dyn BufRead) -> Result<String> {
     if n == 0 {
         return Err(Error::network("connection closed before response"));
     }
-    while line.ends_with('\n') || line.ends_with('\r') {
-        line.pop();
-    }
+    crate::text::chomp(&mut line);
     Ok(line)
 }
 

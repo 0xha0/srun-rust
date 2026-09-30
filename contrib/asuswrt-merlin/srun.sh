@@ -80,7 +80,8 @@ ntp_nudge() {
     i=0
     while [ $i -lt 60 ]; do
         [ "$(nvram get ntp_ready 2>/dev/null)" = 1 ] && return 0
-        if "$BIN" -c "$CFG" -q status 2>/dev/null | grep -q '^online: yes'; then
+        # nvram is cheap; ask the portal only every 10s
+        if [ $((i % 10)) -eq 0 ] && "$BIN" -c "$CFG" -q status 2>/dev/null | grep -q '^online: yes'; then
             service restart_ntpd >/dev/null 2>&1
             logger -t "$TAG" "online, clock not synced yet: restarted ntpd"
             return 0

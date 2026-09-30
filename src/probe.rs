@@ -1,7 +1,8 @@
 //! "Am I online?" checks shared by `login --test` and the daemon.
 
 use crate::error::{Error, Result};
-use crate::protocol::Client;
+use crate::protocol::{Client, StatusResp};
+use std::fmt;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
@@ -28,24 +29,56 @@ impl Probe {
     }
 }
 
+impl fmt::Display for Probe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Probe::Server => f.write_str("server"),
+            Probe::None => f.write_str("none"),
+            Probe::Tcp(t) => f.write_str(t),
+        }
+    }
+}
+
+pub enum Online {
+    /// The portal reports a session on this address.
+    Portal(Box<StatusResp>),
+    /// The tcp target answered.
+    Tcp,
+    Offline,
+}
+
+impl Online {
+    pub fn is_online(&self) -> bool {
+        !matches!(self, Online::Offline)
+    }
+}
+
 pub fn tcp_reachable(target: &str, timeout: Duration) -> bool {
     let Ok(addrs) = target.to_socket_addrs() else {
         return false;
     };
-    for a in addrs {
-        if TcpStream::connect_timeout(&a, timeout).is_ok() {
-            return true;
-        }
-    }
-    false
+    addrs
+        .into_iter()
+        .any(|a| TcpStream::connect_timeout(&a, timeout).is_ok())
 }
 
-/// `Ok(true)` when online. Network failures are reported as errors for the
-/// server probe (the caller decides) and as offline for the tcp probe.
-pub fn is_online(client: &Client, probe: &Probe) -> Result<bool> {
+/// Network failures are errors for the server probe (the caller decides
+/// whether to keep going) and simply "offline" for the tcp probe.
+pub fn check(client: &Client, probe: &Probe) -> Result<Online> {
     match probe {
-        Probe::Server => Ok(client.status()?.is_online()),
-        Probe::Tcp(t) => Ok(tcp_reachable(t, client.opts.connect_timeout)),
-        Probe::None => Ok(false),
+        Probe::Server => {
+            let st = client.status()?;
+            Ok(if st.is_online() {
+                Online::Portal(Box::new(st))
+            } else {
+                Online::Offline
+            })
+        }
+        Probe::Tcp(t) => Ok(if tcp_reachable(t, client.opts.connect_timeout) {
+            Online::Tcp
+        } else {
+            Online::Offline
+        }),
+        Probe::None => Ok(Online::Offline),
     }
 }

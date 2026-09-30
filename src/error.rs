@@ -43,6 +43,14 @@ impl Error {
         Error::Internal(msg.into())
     }
 
+    /// The portal code of a rejection, if this is one.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Error::Rejected { code, .. } => Some(code.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn rejected(code: impl Into<String>, message: impl Into<String>) -> Self {
         Error::Rejected {
             code: code.into(),
@@ -68,12 +76,6 @@ impl std::error::Error for Error {}
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::Network(e.to_string())
-    }
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(e: serde_json::Error) -> Self {
-        Error::Network(format!("bad json: {e}"))
     }
 }
 

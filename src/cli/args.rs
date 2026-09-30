@@ -62,14 +62,6 @@ impl Parsed {
             .find(|(k, v)| k == long && v.is_some())
             .and_then(|(_, v)| v.as_deref())
     }
-
-    pub fn values(&self, long: &str) -> Vec<&str> {
-        self.opts
-            .iter()
-            .filter(|(k, v)| k == long && v.is_some())
-            .filter_map(|(_, v)| v.as_deref())
-            .collect()
-    }
 }
 
 fn find_long<'a>(specs: &'a [OptSpec], name: &str) -> Option<&'a OptSpec> {

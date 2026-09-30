@@ -6,32 +6,51 @@ use common::{MockServer, CLIENT_IP, PASSWORD};
 use std::path::PathBuf;
 use std::process::Command;
 
-fn tmp_config(m: &MockServer, extra: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("srun-cli-{}-{}", std::process::id(), m.port));
+/// A fresh temp dir per test and mock server.
+fn tmp_dir(m: &MockServer, tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("srun-{tag}-{}-{}", std::process::id(), m.port));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("config.json");
-    let json = format!(
-        r#"{{"server":"{}","users":[{{"name":"me","username":"1120240001","password":"{}"}}]{}}}"#,
-        m.url(),
-        PASSWORD,
-        extra
-    );
-    std::fs::write(&path, json).unwrap();
+    dir
+}
+
+/// Write a config with the given users JSON (array body) and extra top-level fields.
+fn write_config(m: &MockServer, tag: &str, users: &str, extra: &str) -> PathBuf {
+    let path = tmp_dir(m, tag).join("config.json");
+    std::fs::write(
+        &path,
+        format!(r#"{{"server":"{}","users":[{users}]{extra}}}"#, m.url()),
+    )
+    .unwrap();
     path
 }
 
-fn run(args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_srun"))
-        .args(args)
+fn tmp_config(m: &MockServer, extra: &str) -> PathBuf {
+    write_config(
+        m,
+        "cli",
+        &format!(r#"{{"name":"me","username":"1120240001","password":"{PASSWORD}"}}"#),
+        extra,
+    )
+}
+
+fn run_env(args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_srun"));
+    cmd.args(args)
         .env_remove("SRUN_CONFIG")
-        .env("HOME", std::env::temp_dir())
-        .output()
-        .unwrap();
+        .env("HOME", std::env::temp_dir());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().unwrap();
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+fn run(args: &[&str]) -> (i32, String, String) {
+    run_env(args, &[])
 }
 
 fn assert_ascii(s: &str) {
@@ -96,13 +115,8 @@ fn full_flow_with_config() {
     assert_eq!(code, 0);
     assert_ascii(&o);
     assert!(o.contains("product: \\u5B66\\u751F-10"), "{o}");
-    let out = Command::new(env!("CARGO_BIN_EXE_srun"))
-        .args(["-c", c, "status"])
-        .env("SRUN_ASCII", "1")
-        .env("HOME", std::env::temp_dir())
-        .output()
-        .unwrap();
-    assert_ascii(&String::from_utf8_lossy(&out.stdout));
+    let (_, o, _) = run_env(&["-c", c, "status"], &[("SRUN_ASCII", "1")]);
+    assert_ascii(&o);
 
     let (code, _, e) = run(&["-c", c, "login", "--test"]);
     assert_eq!(code, 0, "{e}");
@@ -138,17 +152,12 @@ fn adhoc_user_and_rejections() {
     assert_eq!(code, 2, "{e}");
     assert!(e.contains("no password"));
 
-    let out = Command::new(env!("CARGO_BIN_EXE_srun"))
-        .args(["-s", &url, "login", "-u", "1120240001", "--acid", "8", "-q"])
-        .env("SRUN_PASSWORD", PASSWORD)
-        .env("HOME", std::env::temp_dir())
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(0));
-    assert!(
-        out.stderr.is_empty(),
-        "quiet mode prints nothing on success"
+    let (code, _, e) = run_env(
+        &["-s", &url, "login", "-u", "1120240001", "--acid", "8", "-q"],
+        &[("SRUN_PASSWORD", PASSWORD)],
     );
+    assert_eq!(code, 0, "{e}");
+    assert!(e.is_empty(), "quiet mode prints nothing on success");
 }
 
 #[test]
@@ -171,7 +180,7 @@ fn network_error_exit_code() {
 #[test]
 fn user_management_round_trip() {
     let m = MockServer::start();
-    let dir = std::env::temp_dir().join(format!("srun-mgmt-{}-{}", std::process::id(), m.port));
+    let dir = tmp_dir(&m, "mgmt");
     let cfg = dir.join("cfg.json");
     let c = cfg.to_str().unwrap();
 
@@ -271,63 +280,23 @@ fn user_management_round_trip() {
 #[cfg(unix)]
 #[test]
 fn daemon_relogs_after_kick_and_stops_on_sigterm() {
-    use std::io::{BufRead, BufReader};
-    use std::time::{Duration, Instant};
     let m = MockServer::start();
-    let cfg = tmp_config(&m, r#","daemon":{"interval":5}"#);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_srun"))
-        .args([
-            "-c",
-            cfg.to_str().unwrap(),
-            "daemon",
-            "--interval",
-            "5",
-            "--acid",
-            "8",
-            "-v",
-        ])
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
-            let _ = tx.send(line);
-        }
-    });
-    let wait_for = |needle: &str| -> Vec<String> {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut seen = Vec::new();
-        while Instant::now() < deadline {
-            if let Ok(l) = rx.recv_timeout(Duration::from_millis(200)) {
-                seen.push(l.clone());
-                if l.contains(needle) {
-                    return seen;
-                }
-            }
-        }
-        panic!("timeout waiting for {needle:?}, saw {seen:?}");
-    };
-    wait_for("login ok user=1120240001");
+    let cfg = tmp_config(&m, r#","daemon":{"interval":1}"#);
+    let (child, rx) = spawn_daemon(&cfg, &["--acid", "8"]);
+    wait_for_line(&rx, "login ok user=1120240001");
     assert_eq!(m.state.lock().unwrap().logins, 1);
     // simulate a kick: server now says offline
     m.state.lock().unwrap().online = false;
-    wait_for("login ok user=1120240001");
+    wait_for_line(&rx, "login ok user=1120240001");
     assert_eq!(m.state.lock().unwrap().logins, 2);
-    // SIGTERM -> clean exit 0 within a slice
-    unsafe {
-        libc::kill(child.id() as i32, libc::SIGTERM);
-    }
-    let start = Instant::now();
-    let status = child.wait().unwrap();
+    let start = std::time::Instant::now();
+    stop_daemon(child);
     assert!(
-        start.elapsed() < Duration::from_secs(3),
+        start.elapsed() < std::time::Duration::from_secs(3),
         "stop took {:?}",
         start.elapsed()
     );
-    assert_eq!(status.code(), Some(0));
-    wait_for("daemon stopped");
+    wait_for_line(&rx, "daemon stopped");
 }
 
 #[test]
@@ -376,18 +345,15 @@ fn logout_needs_no_config_and_uses_whoever_is_online() {
 #[test]
 fn default_user_falls_back_to_others_on_rejection() {
     let m = MockServer::start();
-    let dir = std::env::temp_dir().join(format!("srun-fb-{}-{}", std::process::id(), m.port));
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("config.json");
-    std::fs::write(
-        &cfg,
-        format!(
-            r#"{{"server":"{}","acid":8,"default_user":"bad","users":[{{"name":"ok","username":"1120240001","password":"{}"}},{{"name":"bad","username":"nobody","password":"x"}}]}}"#,
-            m.url(),
-            PASSWORD
+    let cfg = write_config(
+        &m,
+        "fb",
+        &format!(
+            r#"{{"name":"ok","username":"1120240001","password":"{PASSWORD}"}},{{"name":"bad","username":"nobody","password":"x"}}"#
         ),
-    )
-    .unwrap();
+        r#","acid":8,"default_user":"bad""#,
+    );
+    let dir = cfg.parent().unwrap().to_path_buf();
     let c = cfg.to_str().unwrap();
     let (code, _, e) = run(&["-c", c, "login"]);
     assert_eq!(code, 0, "{e}");
@@ -407,19 +373,15 @@ fn default_user_falls_back_to_others_on_rejection() {
 #[test]
 fn switch_is_idempotent_and_sets_default() {
     let m = MockServer::start();
-    let dir = std::env::temp_dir().join(format!("srun-sw-{}-{}", std::process::id(), m.port));
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("config.json");
-    std::fs::write(
-        &cfg,
-        format!(
-            r#"{{"server":"{}","acid":8,"default_user":"a","users":[{{"name":"a","username":"1120240001","password":"{}"}},{{"name":"b","username":"other","password":"{}"}}]}}"#,
-            m.url(),
-            PASSWORD,
-            PASSWORD
+    let cfg = write_config(
+        &m,
+        "sw",
+        &format!(
+            r#"{{"name":"a","username":"1120240001","password":"{PASSWORD}"}},{{"name":"b","username":"other","password":"{PASSWORD}"}}"#
         ),
-    )
-    .unwrap();
+        r#","acid":8,"default_user":"a""#,
+    );
+    let dir = cfg.parent().unwrap().to_path_buf();
     let c = cfg.to_str().unwrap();
     let (code, _, e) = run(&["-c", c, "login"]);
     assert_eq!(code, 0, "{e}");
@@ -452,7 +414,7 @@ fn switch_is_idempotent_and_sets_default() {
 #[test]
 fn stored_user_without_password_uses_env_or_fails_clearly() {
     let m = MockServer::start();
-    let dir = std::env::temp_dir().join(format!("srun-np-{}-{}", std::process::id(), m.port));
+    let dir = tmp_dir(&m, "np");
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("config.json");
     let c = cfg.to_str().unwrap();
@@ -465,25 +427,18 @@ fn stored_user_without_password_uses_env_or_fails_clearly() {
     let (code, _, e) = run(&["-c", c, "-s", &m.url(), "login", "--acid", "8"]);
     assert_eq!(code, 2, "{e}");
     assert!(e.contains("no password for 1120240001"), "{e}");
-    let out = Command::new(env!("CARGO_BIN_EXE_srun"))
-        .args(["-c", c, "-s", &m.url(), "login", "--acid", "8"])
-        .env("SRUN_PASSWORD", PASSWORD)
-        .env("HOME", std::env::temp_dir())
-        .output()
-        .unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+    let (code, _, e) = run_env(
+        &["-c", c, "-s", &m.url(), "login", "--acid", "8"],
+        &[("SRUN_PASSWORD", PASSWORD)],
     );
+    assert_eq!(code, 0, "{e}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn passwords_are_obfuscated_at_rest() {
     let m = MockServer::start();
-    let dir = std::env::temp_dir().join(format!("srun-obf-{}-{}", std::process::id(), m.port));
+    let dir = tmp_dir(&m, "obf");
     let cfg = dir.join("config.json");
     let c = cfg.to_str().unwrap();
 
@@ -535,14 +490,11 @@ fn config_path_honours_env_and_lists_search_order() {
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("my.json");
     std::fs::write(&cfg, "{}").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_srun"))
-        .args(["config", "path"])
-        .env("SRUN_CONFIG", &cfg)
-        .env("HOME", std::env::temp_dir())
-        .output()
-        .unwrap();
-    let o = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(out.status.code(), Some(0));
+    let (code, o, _) = run_env(
+        &["config", "path"],
+        &[("SRUN_CONFIG", cfg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0);
     assert!(
         o.starts_with(&format!("{} (exists)\nsearch order:\n", cfg.display())),
         "{o}"
@@ -550,15 +502,11 @@ fn config_path_honours_env_and_lists_search_order() {
     assert!(o.contains("(env SRUN_CONFIG, exists)"), "{o}");
     assert!(o.contains("(next to the executable, missing)"), "{o}");
     // an explicit -c wins over the env
-    let out = Command::new(env!("CARGO_BIN_EXE_srun"))
-        .args(["-c", "/nonexistent/x.json", "config", "path"])
-        .env("SRUN_CONFIG", &cfg)
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "/nonexistent/x.json (missing)\n"
+    let (_, o, _) = run_env(
+        &["-c", "/nonexistent/x.json", "config", "path"],
+        &[("SRUN_CONFIG", cfg.to_str().unwrap())],
     );
+    assert_eq!(o, "/nonexistent/x.json (missing)\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -605,19 +553,15 @@ fn transient_rejection_is_retried_with_backoff() {
 #[test]
 fn switch_restores_previous_account_when_new_login_fails() {
     let m = MockServer::start();
-    let dir = std::env::temp_dir().join(format!("srun-swr-{}-{}", std::process::id(), m.port));
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("config.json");
-    std::fs::write(
-        &cfg,
-        format!(
-            r#"{{"server":"{}","acid":8,"retry_delay_ms":50,"default_user":"a","users":[{{"name":"a","username":"1120240001","password":"{}"}},{{"name":"b","username":"other","password":"{}"}}]}}"#,
-            m.url(),
-            PASSWORD,
-            PASSWORD
+    let cfg = write_config(
+        &m,
+        "swr",
+        &format!(
+            r#"{{"name":"a","username":"1120240001","password":"{PASSWORD}"}},{{"name":"b","username":"other","password":"{PASSWORD}"}}"#
         ),
-    )
-    .unwrap();
+        r#","acid":8,"retry_delay_ms":50,"default_user":"a""#,
+    );
+    let dir = cfg.parent().unwrap().to_path_buf();
     let c = cfg.to_str().unwrap();
     let (code, _, e) = run(&["-c", c, "login"]);
     assert_eq!(code, 0, "{e}");
@@ -705,21 +649,15 @@ fn stop_daemon(mut child: std::process::Child) {
 }
 
 #[cfg(unix)]
-fn two_user_config(m: &MockServer, tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("srun-{tag}-{}-{}", std::process::id(), m.port));
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("config.json");
-    std::fs::write(
-        &cfg,
-        format!(
-            r#"{{"server":"{}","acid":"auto","retry_delay_ms":50,"default_user":"a","users":[{{"name":"a","username":"1120240001","password":"{}"}},{{"name":"b","username":"other","password":"{}"}}]}}"#,
-            m.url(),
-            PASSWORD,
-            PASSWORD
+fn two_user_config(m: &MockServer, tag: &str) -> PathBuf {
+    write_config(
+        m,
+        tag,
+        &format!(
+            r#"{{"name":"a","username":"1120240001","password":"{PASSWORD}"}},{{"name":"b","username":"other","password":"{PASSWORD}"}}"#
         ),
+        r#","acid":"auto","retry_delay_ms":50,"default_user":"a""#,
     )
-    .unwrap();
-    cfg
 }
 
 #[cfg(unix)]
@@ -774,7 +712,7 @@ fn daemon_does_not_switch_account_on_network_error() {
         assert_eq!(st.last_login.as_ref().unwrap()["username"], "1120240001");
         assert!(!st.online);
     }
-    // next round (after backoff): the same default user logs in
+    // next round (after a 2s backoff): the same default user logs in
     let seen = wait_for_line(&rx, "login ok user=1120240001");
     assert!(!seen.iter().any(|l| l.contains("user=other")), "{seen:?}");
     assert_eq!(m.state.lock().unwrap().online_user, "1120240001");

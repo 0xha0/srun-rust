@@ -2,14 +2,26 @@
 //! platform's init system (procd, systemd, launchd, task scheduler) keeps
 //! the process alive and restarts it.
 
+use crate::cli::commands::{logout_one, online_user};
 use crate::cli::session::Session;
+use crate::config::User;
 use crate::error::{Error, Result};
-use crate::probe::{self, Probe};
-use crate::protocol::LoginRequest;
+use crate::probe::{self, Online, Probe};
+use crate::protocol::{errors, LoginOutcome};
 use crate::term;
 use std::time::{Duration, Instant};
 
 pub const MAX_BACKOFF_SECS: u64 = 600;
+
+/// What one user's turn in a round produced.
+enum Turn {
+    /// The address is online (probe or login succeeded); the round is done.
+    Satisfied,
+    /// The portal rejected this user for good; try the next one.
+    Rejected,
+    /// Network trouble or a transient rejection: end the round and back off.
+    EndRound,
+}
 
 pub fn run(s: &Session) -> Result<()> {
     let interval: u64 = match s.p.value("interval") {
@@ -18,155 +30,65 @@ pub fn run(s: &Session) -> Result<()> {
             .map_err(|_| Error::usage(format!("interval must be seconds, got {v}")))?,
         None => s.cfg.daemon.interval,
     };
-    let interval = interval.max(5);
+    let interval = interval.max(1);
     let probe = match s.p.value("probe") {
         Some(v) => Probe::parse(v)?,
         None => Probe::parse(&s.cfg.daemon.probe)?,
     };
     let logout_on_exit = s.p.flag("logout-on-exit") || s.cfg.daemon.logout_on_exit;
-    let mut users = if s.p.flag("all") {
-        s.select_users()?
-    } else {
+    // Without --all the list is [default, fallbacks...]: one session at a
+    // time, so a round stops at the first satisfied user. With --all every
+    // user has its own bound connection and each gets a turn.
+    let one_at_a_time = !s.p.flag("all");
+    let mut users = if one_at_a_time {
         s.login_candidates()?
+    } else {
+        s.select_users()?
     };
     for u in users.iter_mut() {
         s.ensure_password(u)?;
     }
-    // Without --all the list is [default, fallbacks...]: one session at a time.
-    let one_at_a_time = !s.p.flag("all");
 
     term::install_stop_handlers();
     crate::log_info!(
-        "daemon started interval={interval}s probe={} users={}",
-        match &probe {
-            Probe::Server => "server".to_string(),
-            Probe::None => "none".to_string(),
-            Probe::Tcp(t) => t.clone(),
-        },
+        "daemon started interval={interval}s probe={probe} users={}",
         users.len()
     );
 
-    let mut acid_cache: Option<i64> = None;
     let mut failures: u32 = 0;
     let started = Instant::now();
     while !term::stop_requested() {
-        let mut all_ok = true;
-        let mut satisfied = false;
+        let mut round_ok = !one_at_a_time;
         for user in &users {
-            if term::stop_requested() || (one_at_a_time && satisfied) {
+            if term::stop_requested() {
                 break;
             }
-            let ip = match s.resolve_ip(user) {
-                Ok(ip) => ip,
-                Err(e) => {
-                    crate::log_warn!("user={}: {e}", user.username);
-                    all_ok = false;
-                    continue;
+            match turn(s, user, &probe) {
+                Turn::Satisfied if one_at_a_time => {
+                    round_ok = true;
+                    break;
                 }
-            };
-            let client = match s.client_for(&ip) {
-                Ok(c) => c,
-                Err(e) => {
-                    crate::log_warn!("user={}: {e}", user.username);
-                    all_ok = false;
-                    continue;
-                }
-            };
-            // For the server probe, report who the portal says is online.
-            let online = if probe == Probe::Server {
-                match client.status() {
-                    Ok(st) if st.is_online() => {
-                        crate::log_debug!("online as {} ip={}", st.user_name, st.online_ip);
-                        true
-                    }
-                    Ok(_) => false,
-                    Err(e) => {
-                        crate::log_warn!("probe failed: {e}");
-                        false
+                Turn::Satisfied => {}
+                Turn::Rejected => {
+                    if !one_at_a_time {
+                        round_ok = false;
                     }
                 }
-            } else {
-                match probe::is_online(&client, &probe) {
-                    Ok(b) => {
-                        if b {
-                            crate::log_debug!("online (probe ok)");
-                        }
-                        b
-                    }
-                    Err(e) => {
-                        crate::log_warn!("probe failed: {e}");
-                        false
-                    }
-                }
-            };
-            if online {
-                satisfied = true;
-                continue;
-            }
-            let acid = match acid_cache {
-                Some(a) => a,
-                None => {
-                    // Only a detected/fixed value is kept; a failed detection
-                    // (WAN still down) is retried next round.
-                    let (a, reliable) = s.resolve_acid(&client);
-                    if reliable {
-                        acid_cache = Some(a);
-                    }
-                    a
-                }
-            };
-            let req = LoginRequest {
-                username: user.username.clone(),
-                password: user.password.clone(),
-                ip: ip.clone(),
-                acid,
-                password_mode: s.password_mode,
-            };
-            match client.login(&req) {
-                Ok(o) => {
-                    crate::log_info!("login ok user={} ip={}", user.username, o.ip);
-                    satisfied = true;
-                }
-                Err(Error::Rejected { code, .. })
-                    if code == "E2620" || code == "ip_already_online_error" =>
-                {
-                    crate::log_info!("already online user={}", user.username);
-                    satisfied = true;
-                }
-                Err(e) if crate::cli::commands::is_transient(&e) => {
-                    crate::log_warn!("login user={}: {e}; backing off", user.username);
-                    all_ok = false;
-                    if one_at_a_time {
-                        break;
-                    }
-                }
-                Err(e @ Error::Rejected { .. }) if one_at_a_time => {
-                    crate::log_warn!("login rejected user={}: {e}, trying next", user.username);
-                }
-                Err(e) => {
-                    // Network trouble: never switch accounts over it. End
-                    // the round and let the backoff retry the same user.
-                    crate::log_warn!(
-                        "login failed user={}: {e}; ending this round",
-                        user.username
-                    );
-                    all_ok = false;
+                Turn::EndRound => {
+                    round_ok = false;
                     if one_at_a_time {
                         break;
                     }
                 }
             }
         }
-        if one_at_a_time && !satisfied {
-            all_ok = false;
-        }
-        let delay = if all_ok {
+        let delay = if round_ok {
             failures = 0;
             interval
         } else {
             failures = failures.saturating_add(1);
             let backoff = interval.saturating_mul(1u64 << failures.min(10));
-            let jitter = started.elapsed().as_secs() % 7;
+            let jitter = started.elapsed().as_secs() % (interval / 8).max(1);
             backoff.min(MAX_BACKOFF_SECS) + jitter
         };
         crate::log_debug!("next check in {delay}s");
@@ -176,36 +98,87 @@ pub fn run(s: &Session) -> Result<()> {
     }
 
     if logout_on_exit {
-        // Log out only what the portal says is online on this connection
-        // (with --all, each user's own bound connection).
-        let targets: Vec<&crate::config::User> = if one_at_a_time {
-            users.iter().take(1).collect()
+        // Log out only what the portal says is online (with --all, on each
+        // user's own bound connection).
+        let targets = if one_at_a_time {
+            &users[..1.min(users.len())]
         } else {
-            users.iter().collect()
+            &users[..]
         };
         for user in targets {
-            let ip = s.resolve_ip(user).unwrap_or_default();
-            let Ok(client) = s.client_for(&ip) else {
+            let Ok((ip, client)) = s.prepare(user) else {
                 continue;
             };
-            match client.status() {
-                Ok(st) if st.is_online() => {
-                    let acid = acid_cache.unwrap_or(crate::protocol::client::DEFAULT_ACID);
+            match online_user(&client) {
+                Ok(Some(st)) => {
                     let ip = if ip.is_empty() {
                         st.online_ip.clone()
                     } else {
                         ip
                     };
-                    match client.logout(&st.user_name, &ip, acid) {
-                        Ok(_) => crate::log_info!("logout ok user={}", st.user_name),
-                        Err(e) => crate::log_warn!("logout user={}: {e}", st.user_name),
+                    if let Err(e) = logout_one(&client, &st.user_name, &ip, s.acid(&client)) {
+                        crate::log_warn!("logout user={}: {e}", st.user_name);
                     }
                 }
-                Ok(_) => crate::log_debug!("not online, nothing to log out"),
+                Ok(None) => crate::log_debug!("not online, nothing to log out"),
                 Err(e) => crate::log_warn!("logout check failed: {e}"),
             }
         }
     }
     crate::log_info!("daemon stopped");
     Ok(())
+}
+
+fn turn(s: &Session, user: &User, probe: &Probe) -> Turn {
+    let (ip, client) = match s.prepare(user) {
+        Ok(v) => v,
+        Err(e) => {
+            crate::log_warn!("user={}: {e}", user.username);
+            return Turn::Rejected;
+        }
+    };
+    match probe::check(&client, probe) {
+        Ok(Online::Portal(st)) => {
+            crate::log_debug!("online as {} ip={}", st.user_name, st.online_ip);
+            return Turn::Satisfied;
+        }
+        Ok(Online::Tcp) => {
+            crate::log_debug!("online (probe ok)");
+            return Turn::Satisfied;
+        }
+        Ok(Online::Offline) => {}
+        Err(e) => {
+            // The portal itself is unreachable: a login would only burn
+            // more connect timeouts against the same host.
+            crate::log_warn!("probe failed: {e}; ending this round");
+            return Turn::EndRound;
+        }
+    }
+    let acid = s.acid(&client);
+    match client.login(&s.login_request(user, &ip, acid)) {
+        Ok(LoginOutcome::LoggedIn { ip, .. }) => {
+            crate::log_info!("login ok user={} ip={ip}", user.username);
+            Turn::Satisfied
+        }
+        Ok(LoginOutcome::AlreadyOnline { online_as }) => {
+            crate::log_info!("already online as {online_as}");
+            Turn::Satisfied
+        }
+        Err(e) if e.code().is_some_and(errors::is_transient) => {
+            crate::log_warn!("login user={}: {e}; backing off", user.username);
+            Turn::EndRound
+        }
+        Err(e @ Error::Rejected { .. }) => {
+            crate::log_warn!("login rejected user={}: {e}, trying next", user.username);
+            Turn::Rejected
+        }
+        Err(e) => {
+            // Network trouble: never switch accounts over it.
+            crate::log_warn!(
+                "login failed user={}: {e}; ending this round",
+                user.username
+            );
+            Turn::EndRound
+        }
+    }
 }

@@ -85,17 +85,9 @@ pub fn candidates() -> Vec<Candidate> {
     v
 }
 
-fn fallback_for_write(c: &[Candidate]) -> PathBuf {
-    // Never create files next to the executable or under /etc by default.
-    c.iter()
-        .find(|k| !matches!(k.source, "next to the executable" | "system config dir"))
-        .or_else(|| c.first())
-        .map(|k| k.path.clone())
-        .unwrap_or_else(|| PathBuf::from(FILE_NAME))
-}
-
-/// The file to read: explicit path, else the first existing candidate, else
-/// where a new one would be written (so `config path` is meaningful).
+/// The config file: an explicit path, else the first existing candidate,
+/// else the first user-writable candidate (never next to the executable or
+/// under /etc), which is where a new file gets written.
 pub fn resolve(explicit: Option<&str>) -> PathBuf {
     if let Some(p) = explicit {
         return PathBuf::from(p);
@@ -103,18 +95,11 @@ pub fn resolve(explicit: Option<&str>) -> PathBuf {
     let c = candidates();
     c.iter()
         .find(|k| k.path.exists())
+        .or_else(|| {
+            c.iter()
+                .find(|k| !matches!(k.source, "next to the executable" | "system config dir"))
+        })
+        .or_else(|| c.first())
         .map(|k| k.path.clone())
-        .unwrap_or_else(|| fallback_for_write(&c))
-}
-
-/// Where a new file should be written when none exists.
-pub fn resolve_for_write(explicit: Option<&str>) -> PathBuf {
-    if let Some(p) = explicit {
-        return PathBuf::from(p);
-    }
-    let c = candidates();
-    c.iter()
-        .find(|k| k.path.exists())
-        .map(|k| k.path.clone())
-        .unwrap_or_else(|| fallback_for_write(&c))
+        .unwrap_or_else(|| PathBuf::from(FILE_NAME))
 }

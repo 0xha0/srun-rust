@@ -24,16 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cross --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@cross
       - run: cross build --release --target ${{ matrix.target }}
-      - name: Package
-        run: |
-          set -e
-          mkdir -p dist
-          bin=target/${{ matrix.target }}/release/srun
-          ls -l "$bin"
-          tar -C "$(dirname "$bin")" -cJf dist/srun-${{ github.ref_name }}-${{ matrix.target }}.tar.xz srun
-          (cd dist && sha256sum *.tar.xz > srun-${{ github.ref_name }}-${{ matrix.target }}.sha256)
+      - run: build/pack.sh ${{ matrix.target }} target/${{ matrix.target }}/release/srun dist ${{ github.ref_name }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
@@ -59,20 +55,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
-      - run: cargo install cross --locked
+      - uses: taiki-e/install-action@cross
       # Tier 3: no rust-std, no self-contained crt/libunwind. Cross.toml
       # pre-build aliases libgcc_eh as libunwind inside the image.
       - run: cross +nightly build --release --target ${{ matrix.target }} -Z build-std=std,panic_abort
         env:
           RUSTFLAGS: -C target-feature=${{ matrix.features }} -C link-self-contained=no
-      - name: Package
-        run: |
-          set -e
-          mkdir -p dist
-          bin=target/${{ matrix.target }}/release/srun
-          ls -l "$bin"
-          tar -C "$(dirname "$bin")" -cJf dist/srun-${{ github.ref_name }}-${{ matrix.target }}.tar.xz srun
-          (cd dist && sha256sum *.tar.xz > srun-${{ github.ref_name }}-${{ matrix.target }}.sha256)
+      - run: build/pack.sh ${{ matrix.target }} target/${{ matrix.target }}/release/srun dist ${{ github.ref_name }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
@@ -95,6 +84,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - name: Build
         shell: bash
         env:
@@ -103,19 +95,9 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          set -e
-          mkdir -p dist
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            bin=target/${{ matrix.target }}/release/srun.exe
-            ls -l "$bin"
-            (cd "$(dirname "$bin")" && 7z a "$GITHUB_WORKSPACE/dist/srun-${{ github.ref_name }}-${{ matrix.target }}.zip" srun.exe >/dev/null)
-            (cd dist && sha256sum *.zip > srun-${{ github.ref_name }}-${{ matrix.target }}.sha256)
-          else
-            bin=target/${{ matrix.target }}/release/srun
-            ls -l "$bin"
-            tar -C "$(dirname "$bin")" -cJf dist/srun-${{ github.ref_name }}-${{ matrix.target }}.tar.xz srun
-            (cd dist && shasum -a 256 *.tar.xz > srun-${{ github.ref_name }}-${{ matrix.target }}.sha256)
-          fi
+          bin=target/${{ matrix.target }}/release/srun
+          [[ "${{ runner.os }}" == "Windows" ]] && bin="$bin.exe"
+          build/pack.sh ${{ matrix.target }} "$bin" dist ${{ github.ref_name }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}

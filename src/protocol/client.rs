@@ -11,6 +11,10 @@ pub const PATH_CHALLENGE: &str = "/cgi-bin/get_challenge";
 pub const PATH_PORTAL: &str = "/cgi-bin/srun_portal";
 pub const PATH_USER_INFO: &str = "/cgi-bin/rad_user_info";
 pub const DEFAULT_ACID: i64 = 12;
+pub const DEFAULT_N: i64 = 200;
+pub const DEFAULT_TYPE: i64 = 1;
+pub const DEFAULT_OS: &str = "Windows 10";
+pub const DEFAULT_NAME: &str = "Windows";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -148,9 +152,16 @@ pub struct LoginRequest {
 }
 
 #[derive(Debug)]
-pub struct LoginOutcome {
-    pub ip: String,
-    pub resp: PortalResp,
+pub enum LoginOutcome {
+    LoggedIn {
+        ip: String,
+        resp: Box<PortalResp>,
+    },
+    /// The portal refused a second session on this address. `online_as` is
+    /// the account it reports online (empty if that lookup failed).
+    AlreadyOnline {
+        online_as: String,
+    },
 }
 
 fn now_secs() -> u64 {
@@ -169,15 +180,27 @@ pub fn strip_jsonp(body: &str) -> &str {
     }
 }
 
+/// A portal refusal as an `Error::Rejected`. `ecode` 0 means the code is in
+/// `error` (e.g. `not_online_error`).
+fn reject(ecode: &Ecode, error: &str, error_msg: &str) -> Error {
+    let ecode = ecode.as_code();
+    let code = if ecode == "0" || ecode.is_empty() {
+        error
+    } else {
+        ecode.as_str()
+    };
+    Error::rejected(code, errors::explain(&ecode, error, error_msg))
+}
+
 impl Client {
     pub fn new(server: Url) -> Self {
         Client {
             server,
             opts: ConnOpts::default(),
-            n: 200,
-            utype: 1,
-            os: "Windows 10".to_string(),
-            name: "Windows".to_string(),
+            n: DEFAULT_N,
+            utype: DEFAULT_TYPE,
+            os: DEFAULT_OS.to_string(),
+            name: DEFAULT_NAME.to_string(),
             double_stack: false,
         }
     }
@@ -248,11 +271,7 @@ impl Client {
     pub fn challenge(&self, username: &str, ip: &str) -> Result<ChallengeResp> {
         let c: ChallengeResp = self.call(PATH_CHALLENGE, &[("username", username), ("ip", ip)])?;
         if c.error != "ok" || c.challenge.is_none() {
-            let code = c.ecode.as_code();
-            return Err(Error::rejected(
-                code.clone(),
-                errors::explain(&code, &c.error, &c.error_msg),
-            ));
+            return Err(reject(&c.ecode, &c.error, &c.error_msg));
         }
         Ok(c)
     }
@@ -298,20 +317,20 @@ impl Client {
                 ("double_stack", double_stack),
             ],
         )?;
-        if resp.res == "ok" && resp.error == "ok" {
-            if resp.suc_msg == "ip_already_online_error" {
-                return Err(Error::rejected(
-                    "ip_already_online_error",
-                    errors::explain("", "ip_already_online_error", ""),
-                ));
-            }
-            return Ok(LoginOutcome { ip, resp });
+        let already_online =
+            resp.suc_msg == "ip_already_online_error" || resp.ecode.as_code() == "E2620";
+        if already_online {
+            // Not a failure: this address has a session. Report whose.
+            let online_as = self.status().map(|st| st.user_name).unwrap_or_default();
+            return Ok(LoginOutcome::AlreadyOnline { online_as });
         }
-        let code = resp.ecode.as_code();
-        Err(Error::rejected(
-            code.clone(),
-            errors::explain(&code, &resp.error, &resp.error_msg),
-        ))
+        if resp.res == "ok" && resp.error == "ok" {
+            return Ok(LoginOutcome::LoggedIn {
+                ip,
+                resp: Box::new(resp),
+            });
+        }
+        Err(reject(&resp.ecode, &resp.error, &resp.error_msg))
     }
 
     pub fn logout(&self, username: &str, ip: &str, acid: i64) -> Result<PortalResp> {
@@ -328,15 +347,7 @@ impl Client {
         if resp.error == "ok" || resp.error == "logout_ok" {
             return Ok(resp);
         }
-        let code = resp.ecode.as_code();
-        Err(Error::rejected(
-            if code == "0" {
-                resp.error.clone()
-            } else {
-                code.clone()
-            },
-            errors::explain(&code, &resp.error, &resp.error_msg),
-        ))
+        Err(reject(&resp.ecode, &resp.error, &resp.error_msg))
     }
 
     pub fn status(&self) -> Result<StatusResp> {

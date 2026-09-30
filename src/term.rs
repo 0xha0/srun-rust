@@ -33,24 +33,15 @@ pub fn stdin_is_tty() -> bool {
 
 /// Read one line from stdin, hiding the echo when stdin is a terminal.
 pub fn read_password(prompt: &str) -> Result<String> {
-    let stderr = std::io::stderr();
-    let _ = stderr
-        .lock()
-        .write_all(crate::text::ascii(prompt).as_bytes());
-    let _ = stderr.lock().flush();
-    let _guard = NoEcho::enable();
-    let mut line = String::new();
-    std::io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| Error::internal(format!("read stdin: {e}")))?;
-    if _guard.is_some() {
-        let _ = stderr.lock().write_all(b"\n");
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(crate::text::ascii(prompt).as_bytes());
+    let _ = stderr.flush();
+    let guard = NoEcho::enable();
+    let line = read_line_stdin();
+    if guard.is_some() {
+        let _ = stderr.write_all(b"\n");
     }
-    while line.ends_with('\n') || line.ends_with('\r') {
-        line.pop();
-    }
-    Ok(line)
+    line
 }
 
 /// Read one line from stdin as-is (for `--password-stdin`).
@@ -60,9 +51,7 @@ pub fn read_line_stdin() -> Result<String> {
         .lock()
         .read_line(&mut line)
         .map_err(|e| Error::internal(format!("read stdin: {e}")))?;
-    while line.ends_with('\n') || line.ends_with('\r') {
-        line.pop();
-    }
+    crate::text::chomp(&mut line);
     Ok(line)
 }
 
@@ -76,11 +65,11 @@ struct NoEcho {
 #[cfg(unix)]
 impl NoEcho {
     fn enable() -> Option<NoEcho> {
+        if !stdin_is_tty() {
+            return None;
+        }
         // SAFETY: plain libc calls on fd 0 with a zeroed termios out-param.
         unsafe {
-            if libc::isatty(0) == 0 {
-                return None;
-            }
             let mut t: libc::termios = std::mem::zeroed();
             if libc::tcgetattr(0, &mut t) != 0 {
                 return None;
